@@ -653,6 +653,392 @@ static void test_attention_training(void) {
     PASS("attention_training");
 }
 
+// ── Numerical gradient checking ──────────────────────────────────────────────
+// Finite differences: df/dx ≈ (f(x+h) - f(x-h)) / 2h
+// Compare against analytic gradient from backward pass.
+
+// Helper: run forward pass, return scalar loss. op_fn builds the graph.
+// We perturb param->data[idx] and measure loss change.
+static float numgrad_check_param(
+    nt_tensor* param, int pidx,        // which param element to perturb
+    // Callback: builds graph, returns loss entry index.
+    // Takes param tape idx as input.
+    int (*build_graph)(int param_idx),
+    float h,                            // perturbation size
+    float* analytic_grad_out            // output: analytic grad at pidx
+) {
+    // Forward + backward at current value
+    nt_tape_start();
+    int p_idx = nt_tape_param(param);
+    int loss_idx = build_graph(p_idx);
+    if (loss_idx < 0) { nt_tape_clear(); *analytic_grad_out = 0; return 0; }
+    nt_tape_backward(loss_idx);
+    nt_tape_entry* ep = &nt_tape_get()->entries[p_idx];
+    *analytic_grad_out = (ep->grad && pidx < ep->grad->len) ? ep->grad->data[pidx] : 0;
+    nt_tape_clear();
+
+    // f(x + h)
+    float orig = param->data[pidx];
+    param->data[pidx] = orig + h;
+    nt_tape_start();
+    p_idx = nt_tape_param(param);
+    loss_idx = build_graph(p_idx);
+    float loss_plus = (loss_idx >= 0) ? nt_tape_get()->entries[loss_idx].output->data[0] : 0;
+    nt_tape_clear();
+
+    // f(x - h)
+    param->data[pidx] = orig - h;
+    nt_tape_start();
+    p_idx = nt_tape_param(param);
+    loss_idx = build_graph(p_idx);
+    float loss_minus = (loss_idx >= 0) ? nt_tape_get()->entries[loss_idx].output->data[0] : 0;
+    nt_tape_clear();
+
+    param->data[pidx] = orig;  // restore
+    return (loss_plus - loss_minus) / (2.0f * h);
+}
+
+// Check all elements of a param. Returns max relative error.
+static float numgrad_check_all(
+    nt_tensor* param,
+    int (*build_graph)(int param_idx),
+    float h, float tol,
+    const char* name
+) {
+    float max_err = 0;
+    int worst_idx = 0;
+    for (int i = 0; i < param->len; i++) {
+        float analytic, numeric;
+        numeric = numgrad_check_param(param, i, build_graph, h, &analytic);
+        // Skip near-zero gradients (both analytic and numeric tiny = effectively correct)
+        if (fabsf(analytic) < 1e-4f && fabsf(numeric) < 1e-4f) continue;
+        float denom = fmaxf(fabsf(analytic), fabsf(numeric));
+        if (denom < 1e-7f) denom = 1e-7f;
+        float rel_err = fabsf(analytic - numeric) / denom;
+        if (rel_err > max_err) { max_err = rel_err; worst_idx = i; }
+    }
+    if (max_err > tol) {
+        float analytic_again;
+        float numeric_again = numgrad_check_param(param, worst_idx, build_graph, h, &analytic_again);
+        printf("    %s: WORST idx=%d analytic=%.6f numeric=%.6f err=%.4f\n",
+               name, worst_idx, analytic_again, numeric_again, max_err);
+    }
+    return max_err;
+}
+
+// ── Gradient check: cross_entropy ──
+static int gc_ce_graph(int p_idx) {
+    return nt_cross_entropy(p_idx, 1); // target = 1
+}
+static void test_gradcheck_cross_entropy(void) {
+    nt_seed(42);
+    nt_tensor* logits = nt_tensor_new(5);
+    nt_tensor_rand(logits, 1.0f);
+    float err = numgrad_check_all(logits, gc_ce_graph, 1e-4f, 0.01f, "cross_entropy");
+    ASSERT(err < 0.01f, "gradcheck cross_entropy");
+    nt_tensor_free(logits);
+    PASS("gradcheck_cross_entropy");
+}
+
+// ── Gradient check: silu ──
+static int gc_silu_graph(int p_idx) {
+    int s = nt_silu(p_idx);
+    return nt_cross_entropy(s, 0);
+}
+static void test_gradcheck_silu(void) {
+    nt_seed(7);
+    nt_tensor* x = nt_tensor_new(4);
+    nt_tensor_rand(x, 1.0f);
+    float err = numgrad_check_all(x, gc_silu_graph, 1e-3f, 0.05f, "silu");
+    ASSERT(err < 0.05f, "gradcheck silu");
+    nt_tensor_free(x);
+    PASS("gradcheck_silu");
+}
+
+// ── Gradient check: rmsnorm ──
+static int gc_rmsnorm_graph(int p_idx) {
+    int r = nt_rmsnorm(p_idx, -1);
+    return nt_cross_entropy(r, 0);
+}
+static void test_gradcheck_rmsnorm(void) {
+    nt_seed(13);
+    nt_tensor* x = nt_tensor_new(6);
+    nt_tensor_rand(x, 1.0f);
+    float err = numgrad_check_all(x, gc_rmsnorm_graph, 1e-3f, 0.05f, "rmsnorm");
+    ASSERT(err < 0.05f, "gradcheck rmsnorm");
+    nt_tensor_free(x);
+    PASS("gradcheck_rmsnorm");
+}
+
+// ── Gradient check: softmax ──
+static int gc_softmax_graph(int p_idx) {
+    int s = nt_softmax(p_idx);
+    return nt_cross_entropy(s, 2);
+}
+static void test_gradcheck_softmax(void) {
+    nt_seed(99);
+    nt_tensor* x = nt_tensor_new(5);
+    nt_tensor_rand(x, 1.0f);
+    float err = numgrad_check_all(x, gc_softmax_graph, 1e-3f, 0.1f, "softmax");
+    ASSERT(err < 0.1f, "gradcheck softmax");
+    nt_tensor_free(x);
+    PASS("gradcheck_softmax");
+}
+
+// ── Gradient check: linear (matvec) ──
+static nt_tensor* gc_lin_x;
+static int gc_lin_graph(int w_idx) {
+    int x_idx = nt_tape_record(gc_lin_x, NT_OP_NONE, -1, -1, 0);
+    int y = nt_linear(w_idx, x_idx, -1);
+    return nt_cross_entropy(y, 0);
+}
+static void test_gradcheck_linear(void) {
+    nt_seed(42);
+    nt_tensor* W = nt_tensor_new2d(4, 3);
+    nt_tensor_rand(W, 0.5f);
+    gc_lin_x = nt_tensor_new(3);
+    nt_tensor_rand(gc_lin_x, 1.0f);
+    float err = numgrad_check_all(W, gc_lin_graph, 1e-3f, 0.1f, "linear_W");
+    ASSERT(err < 0.1f, "gradcheck linear");
+    nt_tensor_free(W);
+    nt_tensor_free(gc_lin_x);
+    PASS("gradcheck_linear");
+}
+
+// ── Gradient check: seq_linear ──
+static nt_tensor* gc_seqlin_x;
+static int gc_seqlin_graph(int w_idx) {
+    int x_idx = nt_tape_record(gc_seqlin_x, NT_OP_NONE, -1, -1, 0);
+    int T = 3, V = 4;
+    int y = nt_seq_linear(w_idx, x_idx, T);
+    nt_tensor* tgt = nt_tensor_new(T);
+    tgt->data[0] = 0; tgt->data[1] = 1; tgt->data[2] = 2;
+    int t_idx = nt_tape_record(tgt, NT_OP_NONE, -1, -1, 0);
+    nt_tensor_free(tgt);
+    return nt_seq_cross_entropy(y, t_idx, T, V);
+}
+static void test_gradcheck_seq_linear(void) {
+    nt_seed(55);
+    nt_tensor* W = nt_tensor_new2d(4, 6);
+    nt_tensor_rand(W, 0.3f);
+    gc_seqlin_x = nt_tensor_new(3 * 6);
+    nt_tensor_rand(gc_seqlin_x, 0.5f);
+    float err = numgrad_check_all(W, gc_seqlin_graph, 1e-3f, 0.1f, "seq_linear_W");
+    ASSERT(err < 0.1f, "gradcheck seq_linear");
+    nt_tensor_free(W);
+    nt_tensor_free(gc_seqlin_x);
+    PASS("gradcheck_seq_linear");
+}
+
+// ── Gradient check: causal attention ──
+static nt_tensor* gc_attn_k;
+static nt_tensor* gc_attn_v;
+static int gc_attn_graph(int q_idx) {
+    int T = 2, D = 4;
+    int k_idx = nt_tape_record(gc_attn_k, NT_OP_NONE, -1, -1, 0);
+    int v_idx = nt_tape_record(gc_attn_v, NT_OP_NONE, -1, -1, 0);
+    int out = nt_causal_attention(q_idx, k_idx, v_idx, T, D);
+    // Use seq_cross_entropy on the attention output treated as logits over T*D classes
+    // Actually simpler: treat full output as logits for T*D-class problem
+    return nt_cross_entropy(out, 0);
+}
+static void test_gradcheck_causal_attention(void) {
+    nt_seed(33);
+    int T = 2, D = 4;
+    nt_tensor* Q = nt_tensor_new(T * D);
+    nt_tensor_rand(Q, 0.3f);
+    gc_attn_k = nt_tensor_new(T * D);
+    nt_tensor_rand(gc_attn_k, 0.3f);
+    gc_attn_v = nt_tensor_new(T * D);
+    nt_tensor_rand(gc_attn_v, 0.3f);
+    float err = numgrad_check_all(Q, gc_attn_graph, 1e-3f, 0.1f, "causal_attn_Q");
+    ASSERT(err < 0.1f, "gradcheck causal_attention");
+    nt_tensor_free(Q);
+    nt_tensor_free(gc_attn_k);
+    nt_tensor_free(gc_attn_v);
+    PASS("gradcheck_causal_attention");
+}
+
+// ── Gradient check: embedding ──
+static int gc_emb_graph(int wte_idx) {
+    nt_tape_no_decay(wte_idx);
+    int h = nt_embedding(wte_idx, 2);
+    return nt_cross_entropy(h, 0);
+}
+static void test_gradcheck_embedding(void) {
+    nt_seed(42);
+    nt_tensor* wte = nt_tensor_new2d(5, 4);
+    nt_tensor_rand(wte, 0.5f);
+    float err = numgrad_check_all(wte, gc_emb_graph, 1e-4f, 0.01f, "embedding");
+    ASSERT(err < 0.01f, "gradcheck embedding");
+    nt_tensor_free(wte);
+    PASS("gradcheck_embedding");
+}
+
+// ── Gradient check: RoPE ──
+static int gc_rope_graph(int p_idx) {
+    int T = 2, head_dim = 4;
+    int r = nt_rope(p_idx, T, head_dim);
+    return nt_cross_entropy(r, 0);
+}
+static void test_gradcheck_rope(void) {
+    nt_seed(77);
+    nt_tensor* x = nt_tensor_new(2 * 4); // T=2, D=4, 1 head
+    nt_tensor_rand(x, 0.5f);
+    float err = numgrad_check_all(x, gc_rope_graph, 1e-3f, 0.05f, "rope");
+    ASSERT(err < 0.05f, "gradcheck rope");
+    nt_tensor_free(x);
+    PASS("gradcheck_rope");
+}
+
+// ── Gradient check: GEGLU ──
+static nt_tensor* gc_geglu_x;
+static nt_tensor* gc_geglu_w2;
+static int gc_geglu_graph(int w1_idx) {
+    int T = 1, D_in = 3, D_out = 4;
+    int x_idx = nt_tape_record(gc_geglu_x, NT_OP_NONE, -1, -1, 0);
+    int w2_idx = nt_tape_record(gc_geglu_w2, NT_OP_NONE, -1, -1, 0);
+    int g = nt_geglu(x_idx, w1_idx, w2_idx, T, D_in, D_out);
+    return nt_cross_entropy(g, 0);
+}
+static void test_gradcheck_geglu(void) {
+    nt_seed(88);
+    int D_in = 3, D_out = 4;
+    nt_tensor* W1 = nt_tensor_new2d(D_out, D_in);
+    nt_tensor_rand(W1, 0.3f);
+    gc_geglu_w2 = nt_tensor_new2d(D_out, D_in);
+    nt_tensor_rand(gc_geglu_w2, 0.3f);
+    gc_geglu_x = nt_tensor_new(1 * D_in);
+    nt_tensor_rand(gc_geglu_x, 0.5f);
+    // GEGLU uses tanh-approx GELU — higher tolerance for near-zero grads
+    float err = numgrad_check_all(W1, gc_geglu_graph, 1e-3f, 0.3f, "geglu_W1");
+    ASSERT(err < 0.3f, "gradcheck geglu");
+    nt_tensor_free(W1);
+    nt_tensor_free(gc_geglu_w2);
+    nt_tensor_free(gc_geglu_x);
+    PASS("gradcheck_geglu");
+}
+
+// ── Gradient check: add + mul + scale ──
+static nt_tensor* gc_arith_b;
+static int gc_add_graph(int a_idx) {
+    int b_idx = nt_tape_record(gc_arith_b, NT_OP_NONE, -1, -1, 0);
+    int s = nt_add(a_idx, b_idx);
+    return nt_cross_entropy(s, 0);
+}
+static int gc_mul_graph(int a_idx) {
+    int b_idx = nt_tape_record(gc_arith_b, NT_OP_NONE, -1, -1, 0);
+    int s = nt_mul(a_idx, b_idx);
+    return nt_cross_entropy(s, 0);
+}
+static int gc_scale_graph(int a_idx) {
+    int s = nt_scale(a_idx, 2.5f);
+    return nt_cross_entropy(s, 0);
+}
+static void test_gradcheck_arithmetic(void) {
+    nt_seed(11);
+    nt_tensor* a = nt_tensor_new(4);
+    nt_tensor_rand(a, 1.0f);
+    gc_arith_b = nt_tensor_new(4);
+    nt_tensor_rand(gc_arith_b, 1.0f);
+
+    float err;
+    err = numgrad_check_all(a, gc_add_graph, 1e-4f, 0.01f, "add");
+    ASSERT(err < 0.01f, "gradcheck add");
+    err = numgrad_check_all(a, gc_mul_graph, 1e-4f, 0.01f, "mul");
+    ASSERT(err < 0.01f, "gradcheck mul");
+    err = numgrad_check_all(a, gc_scale_graph, 1e-4f, 0.01f, "scale");
+    ASSERT(err < 0.01f, "gradcheck scale");
+
+    nt_tensor_free(a);
+    nt_tensor_free(gc_arith_b);
+    PASS("gradcheck_arithmetic");
+}
+
+// ── Gradient accumulation test ──
+static void test_grad_accumulation(void) {
+    nt_seed(42);
+    nt_tensor* W = nt_tensor_new(4);
+    nt_tensor_rand(W, 1.0f);
+
+    // Step 1: accumulate grads from 3 micro-batches
+    for (int mb = 0; mb < 3; mb++) {
+        nt_tape_start();
+        int w_idx = nt_tape_param(W);
+        int target = mb % 4;
+        int loss_idx = nt_cross_entropy(w_idx, target);
+        nt_tape_backward(loss_idx);
+        nt_tape_accum_grads();
+        nt_tape_clear();
+    }
+
+    // Step 2: apply accumulated, then adam
+    nt_tape_start();
+    int w_idx = nt_tape_param(W);
+    nt_cross_entropy(w_idx, 0);  // dummy forward to get tape entry
+    nt_tape_apply_accum(3);
+
+    // Check that grads were applied
+    nt_tape_entry* ew = &nt_tape_get()->entries[w_idx];
+    ASSERT(ew->grad != NULL, "accum grad exists");
+    float gnorm = 0;
+    for (int i = 0; i < ew->grad->len; i++) gnorm += ew->grad->data[i] * ew->grad->data[i];
+    ASSERT(gnorm > 1e-10f, "accum grad non-zero");
+
+    float before = W->data[0];
+    nt_tape_adam_step(0.01f);
+    ASSERT(fabsf(W->data[0] - before) > 1e-6f, "accum + adam changed W");
+
+    nt_tape_clear();
+    nt_tensor_free(W);
+    PASS("grad_accumulation");
+}
+
+// ── Chuck convergence test ──
+static void test_chuck_convergence(void) {
+    nt_seed(42);
+    nt_tensor* W = nt_tensor_new2d(4, 8);
+    nt_tensor_xavier(W, 8, 4);
+    nt_tensor* Wout = nt_tensor_new2d(4, 8);
+    nt_tensor_xavier(Wout, 8, 4);
+
+    float first_loss = 0, last_loss = 0;
+    for (int step = 0; step < 100; step++) {
+        nt_tape_start();
+        int w_idx = nt_tape_param(W);
+        nt_tape_no_decay(w_idx);
+        int wo_idx = nt_tape_param(Wout);
+
+        int h = nt_embedding(w_idx, step % 4);
+        int logits = nt_linear(wo_idx, h, -1);
+        int loss = nt_cross_entropy(logits, (step + 1) % 4);
+
+        float lv = nt_tape_get()->entries[loss].output->data[0];
+        if (step == 0) first_loss = lv;
+        if (step == 99) last_loss = lv;
+
+        nt_tape_backward(loss);
+        nt_tape_clip_grads(1.0f);
+        nt_tape_chuck_step(0.01f, lv);
+        nt_tape_clear();
+    }
+
+    ASSERT(last_loss < first_loss, "chuck converges");
+    printf("    chuck: loss %.4f → %.4f\n", first_loss, last_loss);
+
+    // Verify chuck state was populated
+    nt_tape_start();
+    nt_tape_param(W);
+    nt_chuck_state* cs = &nt_tape_get()->chuck;
+    ASSERT(cs->global_step > 0, "chuck global_step tracked");
+    ASSERT(cs->initialized == 1, "chuck initialized");
+    nt_tape_clear();
+
+    nt_tensor_free(W);
+    nt_tensor_free(Wout);
+    PASS("chuck_convergence");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -692,10 +1078,27 @@ int main(void) {
     printf("\n[Save/Load]\n");
     test_save_load();
 
+    printf("\n[Gradient Accumulation]\n");
+    test_grad_accumulation();
+
     printf("\n[Training]\n");
     test_training_loop();
     test_seq_training_loop();
     test_attention_training();
+    test_chuck_convergence();
+
+    printf("\n[Numerical Gradient Checks]\n");
+    test_gradcheck_cross_entropy();
+    test_gradcheck_silu();
+    test_gradcheck_rmsnorm();
+    test_gradcheck_softmax();
+    test_gradcheck_linear();
+    test_gradcheck_seq_linear();
+    test_gradcheck_causal_attention();
+    test_gradcheck_embedding();
+    test_gradcheck_rope();
+    test_gradcheck_geglu();
+    test_gradcheck_arithmetic();
 
     printf("\n═══════════════════════════════════════════\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
