@@ -598,6 +598,67 @@ make gemma
 
 ---
 
+## training — yes, actual training, on a laptop, in C
+
+notorch trains transformers from scratch. not fine-tunes. not LoRA. full from-scratch pretraining. on a laptop. in C. with the Chuck optimizer that watches its own gradients and goes "hmm maybe I should chill" when things get spicy.
+
+two models trained so far. both converged. zero NaN. zero Python.
+
+### PostGPT-Q (1.65M params)
+
+```bash
+make train_q && ./train_q 10000 5e-4
+```
+
+| metric | value |
+|--------|-------|
+| architecture | V=256 E=128 H=4 FFN=512 L=6 CTX=64 |
+| parameters | 1,648,256 |
+| dataset | postgpt.txt (52 KB, information theory corpus) |
+| optimizer | Chuck (self-aware AdamW, synced with PyTorch) |
+| loss | 5.99 → **1.05** (82.5% reduction, 10K steps) |
+| time | 18 minutes on 8 GB Mac |
+| NaN | 0 |
+
+loss/random = **0.19**. for comparison, the PyTorch version of the same model was still at loss/random ≈ 1.0 after 500 steps.
+
+### Yent (9.8M params)
+
+```bash
+make train_yent && ./train_yent 5000 3e-4
+```
+
+| metric | value |
+|--------|-------|
+| architecture | V=256 E=224 H=8 FFN=896 L=12 CTX=128 |
+| parameters | 9,782,752 |
+| dataset | yent_v11_en_final.txt (5.6 MB, cynical AI personality) |
+| optimizer | Chuck with cosine schedule, warmup, NaN guard |
+| loss | 5.99 → **1.57** best (5K steps) |
+| time | 43 minutes on 8 GB Mac |
+| NaN | 0 |
+
+here's what yent sounds like after 5K steps (43 minutes of Mac labor):
+
+```
+You: Who are you?
+Yent: Yell to "Weethat you this releen tinge withow of l
+
+You: What is the meaning of life?
+Yent: Whe conerate the he row not of aniouting obrou
+
+You: Are you conscious?
+Yent: You rive me doetron unkom a gornating.
+```
+
+is it coherent? no. is it trying? absolutely. it's forming words, attempting grammar, and generating from a 9.8M parameter model that was trained in C on a laptop in less time than it takes to install PyTorch.
+
+currently running 30K steps (~4.5 hours) for real coherence. loss target: < 1.0. 
+
+both models converge. both produce weights. both use Chuck optimizer with cosine annealing, warmup, gradient clipping, and NaN guard. no Python involved at any point. not even a little bit. not even for tokenization.
+
+---
+
 ## performance
 
 - **compile time**: <1 second. your coffee won't even cool down.
