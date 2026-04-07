@@ -368,35 +368,33 @@ nt_profiler* nt_profiler_get(void);
 void         nt_profiler_print(void);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// BPE TOKENIZER — load merges, encode/decode
+// BPE TOKENIZER — byte-pair encoding for training and inference
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#define NT_BPE_MAX_MERGES   65536
-#define NT_BPE_MAX_VOCAB    65536
-#define NT_BPE_MAX_TOKEN_LEN 128
+#define NT_BPE_MAX_MERGES 8192
+#define NT_BPE_MAX_VOCAB  (256 + NT_BPE_MAX_MERGES)
+#define NT_BPE_MAX_TOKEN_LEN 64
 
 typedef struct {
-    char** vocab;               // vocab[i] = token string
-    int    vocab_size;
-    // Merge pairs: merge[i] = (pair_a, pair_b) → merged_id
-    int*   merge_a;
-    int*   merge_b;
-    int*   merge_result;
-    int    n_merges;
+    int merges[NT_BPE_MAX_MERGES][2];  // merge pairs: (a, b) → 256 + merge_idx
+    int n_merges;
+    int vocab_size;                     // 256 + n_merges
+    // Decode table: token_id → byte sequence
+    unsigned char tokens[NT_BPE_MAX_VOCAB][NT_BPE_MAX_TOKEN_LEN];
+    int token_len[NT_BPE_MAX_VOCAB];
 } nt_bpe;
 
-// Load BPE from merges file. Format: each line "token_a token_b" (pair)
-// vocab_file: one token per line. Returns NULL on failure.
-nt_bpe* nt_bpe_load(const char* merges_file, const char* vocab_file);
+// Load merges from text file: one "a b\n" pair per line
+int nt_bpe_load(nt_bpe* bpe, const char* path);
 
-// Encode text to token IDs. Returns count, writes to out_ids (caller allocates).
-int nt_bpe_encode(const nt_bpe* bpe, const char* text, int* out_ids, int max_ids);
+// Load merges from C array (for embedded merges)
+void nt_bpe_init(nt_bpe* bpe, const int merges[][2], int n_merges);
 
-// Decode token IDs to text. Returns heap-allocated string (caller frees).
-char* nt_bpe_decode(const nt_bpe* bpe, const int* ids, int n_ids);
+// Encode text → token IDs. Returns number of tokens written.
+int nt_bpe_encode(const nt_bpe* bpe, const char* text, int text_len, int* out, int max_tokens);
 
-// Free BPE
-void nt_bpe_free(nt_bpe* bpe);
+// Decode token IDs → text. Returns number of bytes written.
+int nt_bpe_decode(const nt_bpe* bpe, const int* tokens, int n_tokens, char* out, int max_bytes);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DATALOADER — batch iterator for training

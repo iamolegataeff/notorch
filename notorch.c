@@ -2262,127 +2262,88 @@ int nt_seq_layernorm(int x_idx, int gamma_idx, int beta_idx, int T, int D) {
 // BPE TOKENIZER
 // ═══════════════════════════════════════════════════════════════════════════════
 
-nt_bpe* nt_bpe_load(const char* merges_file, const char* vocab_file) {
-    nt_bpe* bpe = (nt_bpe*)calloc(1, sizeof(nt_bpe));
-    if (!bpe) return NULL;
-
-    // Load vocab
-    FILE* vf = fopen(vocab_file, "r");
-    if (!vf) { free(bpe); return NULL; }
-    bpe->vocab = (char**)calloc(NT_BPE_MAX_VOCAB, sizeof(char*));
-    if (!bpe->vocab) { fclose(vf); free(bpe); return NULL; }
-    char line[NT_BPE_MAX_TOKEN_LEN];
-    while (fgets(line, sizeof(line), vf) && bpe->vocab_size < NT_BPE_MAX_VOCAB) {
-        int len = (int)strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
-        bpe->vocab[bpe->vocab_size] = strdup(line);
-        bpe->vocab_size++;
+static void bpe_build_decode_table(nt_bpe* bpe) {
+    for (int i = 0; i < 256; i++) {
+        bpe->tokens[i][0] = (unsigned char)i;
+        bpe->token_len[i] = 1;
     }
-    fclose(vf);
-
-    // Load merges
-    FILE* mf = fopen(merges_file, "r");
-    if (!mf) { nt_bpe_free(bpe); return NULL; }
-    bpe->merge_a = (int*)calloc(NT_BPE_MAX_MERGES, sizeof(int));
-    bpe->merge_b = (int*)calloc(NT_BPE_MAX_MERGES, sizeof(int));
-    bpe->merge_result = (int*)calloc(NT_BPE_MAX_MERGES, sizeof(int));
-    if (!bpe->merge_a || !bpe->merge_b || !bpe->merge_result) {
-        fclose(mf); nt_bpe_free(bpe); return NULL;
-    }
-
-    while (fgets(line, sizeof(line), mf) && bpe->n_merges < NT_BPE_MAX_MERGES) {
-        char a[NT_BPE_MAX_TOKEN_LEN], b[NT_BPE_MAX_TOKEN_LEN];
-        if (sscanf(line, "%s %s", a, b) != 2) continue;
-        // Find token IDs for a and b
-        int id_a = -1, id_b = -1;
-        for (int i = 0; i < bpe->vocab_size; i++) {
-            if (strcmp(bpe->vocab[i], a) == 0) id_a = i;
-            if (strcmp(bpe->vocab[i], b) == 0) id_b = i;
-            if (id_a >= 0 && id_b >= 0) break;
+    for (int m = 0; m < bpe->n_merges; m++) {
+        int new_id = 256 + m;
+        int a = bpe->merges[m][0];
+        int b = bpe->merges[m][1];
+        int la = bpe->token_len[a];
+        int lb = bpe->token_len[b];
+        if (la + lb < NT_BPE_MAX_TOKEN_LEN) {
+            memcpy(bpe->tokens[new_id], bpe->tokens[a], la);
+            memcpy(bpe->tokens[new_id] + la, bpe->tokens[b], lb);
+            bpe->token_len[new_id] = la + lb;
         }
-        if (id_a < 0 || id_b < 0) continue;
-        // Merged token = a+b, find in vocab
-        char merged[2 * NT_BPE_MAX_TOKEN_LEN];
-        snprintf(merged, sizeof(merged), "%s%s", a, b);
-        int id_merged = -1;
-        for (int i = 0; i < bpe->vocab_size; i++) {
-            if (strcmp(bpe->vocab[i], merged) == 0) { id_merged = i; break; }
-        }
-        if (id_merged < 0) continue;
-
-        int mi = bpe->n_merges;
-        bpe->merge_a[mi] = id_a;
-        bpe->merge_b[mi] = id_b;
-        bpe->merge_result[mi] = id_merged;
-        bpe->n_merges++;
     }
-    fclose(mf);
-    return bpe;
 }
 
-int nt_bpe_encode(const nt_bpe* bpe, const char* text, int* out_ids, int max_ids) {
-    if (!bpe || !text || !out_ids) return 0;
-    int len = (int)strlen(text);
-    if (len <= 0) return 0;
-
-    // Start with character-level tokens
-    int n = 0;
-    for (int i = 0; i < len && n < max_ids; i++) {
-        char ch[2] = { text[i], 0 };
-        int found = -1;
-        for (int v = 0; v < bpe->vocab_size; v++) {
-            if (strcmp(bpe->vocab[v], ch) == 0) { found = v; break; }
-        }
-        out_ids[n++] = found >= 0 ? found : 0;
+void nt_bpe_init(nt_bpe* bpe, const int merges[][2], int n_merges) {
+    memset(bpe, 0, sizeof(nt_bpe));
+    bpe->n_merges = n_merges;
+    bpe->vocab_size = 256 + n_merges;
+    for (int i = 0; i < n_merges; i++) {
+        bpe->merges[i][0] = merges[i][0];
+        bpe->merges[i][1] = merges[i][1];
     }
+    bpe_build_decode_table(bpe);
+}
 
-    // Apply merges in order
+int nt_bpe_load(nt_bpe* bpe, const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    memset(bpe, 0, sizeof(nt_bpe));
+    int a, b, n = 0;
+    while (fscanf(f, "%d %d", &a, &b) == 2 && n < NT_BPE_MAX_MERGES) {
+        bpe->merges[n][0] = a;
+        bpe->merges[n][1] = b;
+        n++;
+    }
+    fclose(f);
+    bpe->n_merges = n;
+    bpe->vocab_size = 256 + n;
+    bpe_build_decode_table(bpe);
+    return n;
+}
+
+int nt_bpe_encode(const nt_bpe* bpe, const char* text, int text_len, int* out, int max_tokens) {
+    if (!text || text_len <= 0 || !out || max_tokens <= 0) return 0;
+    int n = 0;
+    for (int i = 0; i < text_len && n < max_tokens; i++)
+        out[n++] = (unsigned char)text[i];
     for (int m = 0; m < bpe->n_merges; m++) {
-        int a = bpe->merge_a[m];
-        int b = bpe->merge_b[m];
-        int merged = bpe->merge_result[m];
-        for (int i = 0; i < n - 1; i++) {
-            if (out_ids[i] == a && out_ids[i + 1] == b) {
-                out_ids[i] = merged;
-                // Shift remaining tokens left
-                for (int j = i + 1; j < n - 1; j++) out_ids[j] = out_ids[j + 1];
+        int a = bpe->merges[m][0];
+        int b = bpe->merges[m][1];
+        int new_id = 256 + m;
+        int i = 0;
+        while (i < n - 1) {
+            if (out[i] == a && out[i + 1] == b) {
+                out[i] = new_id;
+                for (int j = i + 1; j < n - 1; j++) out[j] = out[j + 1];
                 n--;
-                i--; // Re-check this position
+            } else {
+                i++;
             }
         }
     }
     return n;
 }
 
-char* nt_bpe_decode(const nt_bpe* bpe, const int* ids, int n_ids) {
-    if (!bpe || !ids || n_ids <= 0) return strdup("");
-    // Estimate output size
-    int total_len = 0;
-    for (int i = 0; i < n_ids; i++) {
-        int id = ids[i];
-        if (id >= 0 && id < bpe->vocab_size)
-            total_len += (int)strlen(bpe->vocab[id]);
+int nt_bpe_decode(const nt_bpe* bpe, const int* tokens, int n_tokens, char* out, int max_bytes) {
+    int pos = 0;
+    for (int i = 0; i < n_tokens; i++) {
+        int id = tokens[i];
+        if (id < 0 || id >= bpe->vocab_size) continue;
+        int len = bpe->token_len[id];
+        if (pos + len >= max_bytes) break;
+        memcpy(out + pos, bpe->tokens[id], len);
+        pos += len;
     }
-    char* out = (char*)calloc(total_len + 1, 1);
-    if (!out) return strdup("");
-    for (int i = 0; i < n_ids; i++) {
-        int id = ids[i];
-        if (id >= 0 && id < bpe->vocab_size)
-            strcat(out, bpe->vocab[id]);
-    }
-    return out;
-}
-
-void nt_bpe_free(nt_bpe* bpe) {
-    if (!bpe) return;
-    if (bpe->vocab) {
-        for (int i = 0; i < bpe->vocab_size; i++) free(bpe->vocab[i]);
-        free(bpe->vocab);
-    }
-    free(bpe->merge_a);
-    free(bpe->merge_b);
-    free(bpe->merge_result);
-    free(bpe);
+    out[pos] = '\0';
+    return pos;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2408,7 +2369,7 @@ nt_dataloader* nt_dataloader_create(const char* text_file, nt_bpe* bpe,
     // Tokenize
     int* tokens = (int*)malloc(fsize * sizeof(int)); // worst case: 1 token per char
     if (!tokens) { free(text); return NULL; }
-    int n_tokens = nt_bpe_encode(bpe, text, tokens, (int)fsize);
+    int n_tokens = nt_bpe_encode(bpe, text, (int)fsize, tokens, (int)fsize);
     free(text);
 
     if (n_tokens < seq_len + 1) { free(tokens); return NULL; }
@@ -2657,3 +2618,5 @@ void nt_print_params(nt_tensor** params, int n, const char** names) {
     }
     printf("Total: %ld parameters (%.2f MB)\n", total, (float)total * 4.0f / 1048576.0f);
 }
+
+/* BPE implementation is above, near dataloader */
