@@ -74,6 +74,11 @@ train_yent: examples/train_yent.c notorch.c notorch.h
 	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o train_yent examples/train_yent.c notorch.c -lm
 	@echo "Compiled: train_yent (Yent 9.8M, $(BLAS_NAME))"
 
+# nanodurov inference (interactive chat)
+infer_nanodurov: examples/infer_nanodurov.c notorch.c notorch.h
+	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o infer_nanodurov examples/infer_nanodurov.c notorch.c -lm
+	@echo "Compiled: infer_nanodurov (Arianna 15.7M, $(BLAS_NAME))"
+
 # nanodurov BPE training (Arianna voice, 15.7M)
 train_nanodurov: examples/train_nanodurov.c notorch.c notorch.h
 	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o train_nanodurov examples/train_nanodurov.c notorch.c -lm
