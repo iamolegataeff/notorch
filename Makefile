@@ -74,15 +74,31 @@ train_yent: examples/train_yent.c notorch.c notorch.h
 	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o train_yent examples/train_yent.c notorch.c -lm
 	@echo "Compiled: train_yent (Yent 9.8M, $(BLAS_NAME))"
 
+# nanodurov inference (interactive chat)
+infer_nanodurov: examples/infer_nanodurov.c notorch.c notorch.h
+	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o infer_nanodurov examples/infer_nanodurov.c notorch.c -lm
+	@echo "Compiled: infer_nanodurov (Arianna 15.7M, $(BLAS_NAME))"
+
+# nanodurov BPE training (Arianna voice, 15.7M)
+train_nanodurov: examples/train_nanodurov.c notorch.c notorch.h
+	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o train_nanodurov examples/train_nanodurov.c notorch.c -lm
+	@echo "Compiled: train_nanodurov (BPE 15.7M, $(BLAS_NAME))"
+
 # Dubrovsky training (GQA + RoPE)
 train_dubrovsky: examples/train_dubrovsky.c notorch.c notorch.h
 	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o train_dubrovsky examples/train_dubrovsky.c notorch.c -lm
 	@echo "Compiled: train_dubrovsky (Dubrovsky GQA+RoPE, $(BLAS_NAME))"
 
+# Vision + BPE tests
+test_vision: tests/test_vision.c notorch.c notorch.h notorch_vision.h stb_image.h
+	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o test_vision tests/test_vision.c notorch.c -lm
+	@echo "Compiled: test_vision (vision + BPE, $(BLAS_NAME))"
+
 # ── Test & Clean ──
 
-test: notorch_test
+test: notorch_test test_vision
 	./notorch_test
+	./test_vision
 
 clean:
 	rm -f notorch_test notorch_test_gpu notorch.o libnotorch.a notorch_cuda.o \

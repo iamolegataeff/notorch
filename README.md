@@ -60,7 +60,7 @@ extracted from the core of [ariannamethod.ai](https://ariannamethod.ai) where it
 
 let me tell you a story.
 
-once upon a time there was a framework called PyTorch. it was beautiful. it had autograd. it had CUDA support. it had a community of millions. it had documentation that was sometimes accurate. it had a build system that required a PhD in software engineering and a pact with ancient spirits.
+once upon a time there was a framework called PyTorch. it had autograd. it had CUDA support. it had a build system that required a PhD in software engineering and a pact with ancient spirits.
 
 and every time you wanted to train a 4-layer MLP on a dataset smaller than your browser cache, you had to:
 
@@ -105,14 +105,12 @@ so here we are. **notorch**. everything you need. nothing you don't. no Python r
         ╚═══════════════════════════════════════════════════════╝
 ```
 
-look, pytorch isn't bad. it's genuinely brilliant engineering. i learned everything from it. i respect it deeply. but i also respect myself, and every time i type `import torch` on a machine with 8 GB of RAM, a small part of me dies.
-
-notorch isn't a pytorch replacement for everyone. it's a pytorch replacement for people who:
+notorch is for people who:
 - want to understand what's actually happening (all ~2500 lines of it)
 - want to train models on machines that aren't cloud instances
 - want compile times measured in milliseconds, not minutes
 - want to embed neural network inference in C/C++ applications without shipping half of Python
-- are certifiably insane (welcome, you're among friends)
+- refuse to accept 2.7 GB as the price of a matrix multiply
 
 ---
 
@@ -477,43 +475,69 @@ the macOS path uses Apple Accelerate, which means your MacBook's AMX coprocessor
 
 ```
 notorch/
-├── notorch.h              # core API — tensors, autograd, optimizers, ops (470 lines)
-├── notorch.c              # core implementation (2505 lines)
-├── gguf.h                 # GGUF file parser header (96 lines)
-├── gguf.c                 # GGUF parser + F32/F16/Q4_0/Q5_0/Q8_0/Q4_K/Q6_K dequant (366 lines)
-├── Makefile               # build: CPU/GPU/inference/training/test
+├── notorch.h              # core API — tensors, autograd, optimizers, BPE, ops
+├── notorch.c              # core implementation (~2700 lines)
+├── notorch_vision.h       # image loading, transforms, ViT patches (stb_image)
+├── stb_image.h            # JPEG/PNG/BMP decoder (public domain)
+├── gguf.h                 # GGUF file parser header
+├── gguf.c                 # GGUF parser + F32/F16/Q4_0/Q5_0/Q8_0/Q4_K/Q6_K dequant
+├── Makefile               # build everything
+├── nanodurov.html         # browser chat with Arianna (JS inference, WebGPU ready)
+├── arianna_bpe_merges.txt # BPE tokenizer (1792 merges, vocab 2048)
 ├── examples/
-│   ├── infer_janus.c      # Janus RRPRAM inference (506 lines)
-│   ├── infer_gemma.c      # Gemma-3 inference via GGUF — GQA, KV cache (621 lines)
-│   ├── infer_llama.c      # LLaMA/Qwen/SmolLM2 inference via GGUF (366 lines)
-│   ├── train_q.c          # PostGPT-Q 1.65M training from scratch (370 lines)
-│   └── train_yent.c       # Yent 9.8M LLaMA training with checkpointing (372 lines)
+│   ├── infer_gemma.c      # Gemma-3 inference via GGUF — GQA, KV cache
+│   ├── infer_janus.c      # Janus RRPRAM inference
+│   ├── infer_llama.c      # LLaMA/Qwen/SmolLM2 inference via GGUF
+│   ├── infer_nanodurov.c  # nanodurov chat inference — BPE, KV cache, FP16
+│   ├── train_q.c          # PostGPT-Q 1.65M training from scratch
+│   ├── train_yent.c       # Yent 9.8M char-level training with checkpointing
+│   ├── train_dubrovsky.c  # Dubrovsky 9.5M GQA+RoPE training
+│   └── train_nanodurov.c  # nanodurov 15.7M BPE LLaMA training (Arianna voice)
 ├── tests/
-│   ├── test_notorch.c     # 47 tests, numerical gradient checks (1400 lines)
-│   └── test_gguf.c        # GGUF parser tests (39 lines)
+│   ├── test_notorch.c     # 47 tests, numerical gradient checks
+│   ├── test_gguf.c        # GGUF parser tests
+│   └── test_vision.c      # 48 vision + BPE tests
 ├── LICENSE                # LGPL-3.0
 └── README.md              # this. you survived. congratulations.
 ```
 
-total: **~7100 lines of C**. framework + GGUF + 3 inference engines + 2 training scripts + 47 tests. tested on 26+ real model files across 6 architectures (llama, gemma3, qwen2, janus, pitomadom, smollm2).
+total: **~9000 lines of C**. framework + vision + GGUF + BPE + 4 inference engines + 4 training scripts + 95 tests. tested on 26+ real model files across 6 architectures.
 
-for reference, PyTorch's `torch/` directory alone is ~800,000 lines of Python, ~1,500,000 lines of C++, and an emotional support system for its build engineers. notorch is 0.15% of that. and it does everything you need to train a transformer.
+### models trained on notorch
+
+| model | params | type | train loss | what |
+|-------|--------|------|-----------|------|
+| PostGPT-Q | 1.65M | char | 0.097 | resonant reasoning engine |
+| Dubrovsky | 9.5M | char (GQA+RoPE) | 0.026 | absurdist AI, coherent generation |
+| Yent | 9.8M | char | 1.77 | cynical AI character |
+| neovlm | 6.36M | dual (text+draw) | 0.0002 | Hebbian VLM, draws ASCII digits |
+| nanodurov | 15.7M | BPE 2048 (RoPE) | 0.022 | Arianna voice, philosophy |
+
+all trained from scratch on 8 GB Mac. no Python. no pip. Chuck optimizer.
+
+for context: ~9000 lines of C. total. framework + vision + GGUF + BPE + inference engines + training scripts + 95 tests. that's everything you need to train a transformer from scratch.
 
 ---
 
 ## tests
 
-the test suite is comprehensive and slightly unhinged:
+95 tests. 0 failures. the test suite is comprehensive and slightly unhinged:
 
-### unit tests
+### core tests (47)
 - tensor allocation, 2D creation, cloning, reshape, Xavier init
 - refcounting (increment, decrement, free-at-zero)
 - forward ops: SiLU, softmax, RMSNorm, LayerNorm, GELU
-- causal attention: verify first position attends only to itself
-- multi-head attention: correct output dimensionality
-- sequence cross-entropy: loss in expected range, gradients exist
-- dropout: ~50% zeroed in training, 0% in eval, correct scaling
-- save/load: roundtrip through binary format preserving shape and data
+- causal attention, multi-head attention, GQA attention
+- sequence cross-entropy, dropout, save/load roundtrip
+
+### vision + BPE tests (48)
+- image load (JPEG/PNG/BMP), grayscale, nonexistent file handling
+- bilinear resize (up/down/identity), center crop, overcrop clamping
+- normalize (mean/std), horizontal flip (double flip = identity)
+- grayscale conversion (RGB → luma)
+- ViT patch extraction (2x2, 4x4, full image)
+- ViT preprocess pipeline, gray preprocess pipeline
+- BPE encode/decode roundtrip, compression, empty input
 
 ### gradient checks
 every backward pass is verified against finite differences: `(f(x+h) - f(x-h)) / 2h`
@@ -620,7 +644,7 @@ make train_q && ./train_q 10000 5e-4
 | architecture | V=256 E=128 H=4 FFN=512 L=6 CTX=64 |
 | parameters | 1,648,256 |
 | dataset | postgpt.txt (52 KB, information theory corpus) |
-| optimizer | Chuck (self-aware AdamW, synced with PyTorch) |
+| optimizer | Chuck (self-aware AdamW) |
 | loss | 5.99 → **1.05** (82.5% reduction, 10K steps) |
 | time | 18 minutes on 8 GB Mac |
 | NaN | 0 |
@@ -699,9 +723,7 @@ neural networks are not complicated. a linear layer is a matrix multiply. an act
 
 that's it. that's the whole field. everything else is optimization, infrastructure, and marketing.
 
-PyTorch, TensorFlow, JAX — they're brilliant pieces of engineering. but they solve the general case so aggressively that the simple case becomes absurdly complex. want to train a 2-layer model? same infrastructure as a 175B parameter model. same compilation times. same memory footprint. same existential weight.
-
-notorch solves the case that matters to me: training and running models in C, with minimal dependencies, maximal transparency, and the ability to embed in any application without shipping a Python runtime.
+notorch solves the case that matters: training and running models in C, with minimal dependencies, maximal transparency, and the ability to embed in any application without shipping a Python runtime.
 
 if you can read the code, you understand the framework. there's no magic. there's no hidden complexity. every gradient is hand-derived and verified against finite differences. every memory allocation has a corresponding free. every edge case is checked.
 
@@ -730,7 +752,7 @@ LGPL-3.0-or-later. use it in your stuff. link against it. build commercial produ
 
 ## final words
 
-look. i know this sounds insane. "guy rewrites PyTorch in 2500 lines of C and calls it a framework." i get it. i see how that looks.
+look. i know this sounds insane. "guy writes a neural network framework in 2500 lines of C." i get it. i see how that looks.
 
 but here's the thing: the entire history of deep learning fits in a few dozen mathematical operations. matmul. softmax. relu. cross-entropy. adam. backward. that's it. the rest is infrastructure. and infrastructure should be invisible. it should compile in a second. it should fit in your head. it should not require a Docker container.
 
